@@ -7,6 +7,8 @@
 #include <stdio.h>
 
 struct t_client_database g_clients_db;
+struct t_client_config g_client_cfg;
+
 pthread_mutex_t g_epoll_id_lock = PTHREAD_MUTEX_INITIALIZER;
 static long int g_total_msg_counter = 0;
 static char g_SendMsgBuf[MAX_MSG_LEN];
@@ -15,33 +17,40 @@ static int g_recv_print_speed = 10;
 static double g_max_delay = 0;
 static double g_min_delay = 0;
 static double g_total_delay = 0;
+static long int g_last_statistics_time = 0;
+
 
 long int get_time(char* msg)
 {
 	if(NULL == msg)
 		return 0;
-	char* _b_str = "<t:";
-	char _e_str = '>';
+
 	long int _value = 0;
 	char* _start_pos= NULL;
 	char* _end_pos = NULL;
 	char _tmp_buf[DEFAULT_COMMON_VALUE];
+	memset(_tmp_buf, 0, DEFAULT_COMMON_VALUE);
 	int i = 0;
-	_start_pos = strstr(msg,_b_str);
-	_end_pos = strrchr(msg,_e_str);
-	if(NULL==_start_pos || NULL==_end_pos)
+	_start_pos = strstr(msg,"<t:");
+	if(NULL==_start_pos)
 		return 0;
 	_start_pos += 3;
-	if(_start_pos > _end_pos)
-		return 0;
-	memset(_tmp_buf, 0, DEFAULT_COMMON_VALUE);
+	_end_pos = _start_pos;	
 	i = 0;
-	while(_start_pos < _end_pos){
-		*(_tmp_buf+i) = *_start_pos;
+	//printf("[get_time] will search time section!start_pos[%d]\n",_start_pos);
+	while(*_end_pos != '>' && *_end_pos != '\0'){
+	*(_tmp_buf+i) = *_end_pos;
 		++i;
-		++_start_pos;
-	}	
+	_end_pos++;
+
+	}
+	//printf("[get_time] search time over!\n");
+	if(_tmp_buf == _start_pos)
+		return 0;
+	
+
 	_value = atol(_tmp_buf);
+	//printf("[get_time] search time over! time[%ld]\n", _value);
 	return _value;
 }
 
@@ -58,41 +67,49 @@ void my_message_callback(struct mosquitto *mosq, void *obj, const struct mosquit
 		return;
 	}
 	ud = (struct userdata *)obj;
+	//printf("[my_message_callback]client:(%s)received message! topic(%s), payload(%s)\n", mosq->id, message->topic, (const char *)message->payload);
 
 	if(message->retain && ud->no_retain) return;
 	if(ud->verbose){
 		if(message->payloadlen){
-			printf("[recv]%s %s\n", message->topic, (const char *)message->payload);
+			printf("[my_message_callback]topic:(%s) payload(%s)\n", message->topic, (const char *)message->payload);
 		}else{
-			printf("%s (null)\n", message->topic);
+			printf("topic:(%s) payload is NULL\n", message->topic);
 		}
 		fflush(stdout);
 	}else{
 		if(message->payloadlen){
 			g_total_msg_counter++;
 			ud->recv_msg_counter++;
+			//printf("[my_message_callback] will get time msg[%s]\n",message->payload);
 			msg_send_time = get_time(message->payload);
-			gettimeofday(&cur_time,NULL);
-			cur_time_l = cur_time.tv_sec*1000000+cur_time.tv_usec;
-			_time_interval = ((double)cur_time_l - msg_send_time)/1000;
-			g_total_delay = g_total_delay + _time_interval;
+			if(msg_send_time > 0){
+			    gettimeofday(&cur_time,NULL);
+			    cur_time_l = cur_time.tv_sec*1000000+cur_time.tv_usec;
+			    _time_interval = ((double)cur_time_l - msg_send_time)/1000;
+			    g_total_delay = g_total_delay + _time_interval;
 
-			if(g_max_delay < _time_interval)
-				g_max_delay =  _time_interval;
+			    if(g_max_delay < _time_interval)
+				    g_max_delay =  _time_interval;
 
-			if(g_min_delay > _time_interval || g_min_delay <0.000001)
-				g_min_delay =  _time_interval;
+			    if(g_min_delay > _time_interval || g_min_delay <0.000001)
+				    g_min_delay =  _time_interval;
+			}
+			//printf("[my_message_callback] will handle receive counter[%d]\n", g_total_msg_counter);
 			
 			if(g_total_msg_counter%g_recv_print_speed == 0){
-				printf("[<-R]id:[%s];msg:[%s];counter[%ld];delay[%.2f ms];max_delay[%.2f];min_delay[%.2f]\n",
-					ud->usr_id, (const char *)message->payload,ud->recv_msg_counter,g_total_delay/g_recv_print_speed,g_max_delay,g_min_delay);
+
+				printf("[my_message_callback]id:[%s];statistical period :(%ld s)；msg content[%s]; total receive counter[%ld];avd delay[%.2f ms];max delay[%.2f];min delay[%.2f]\n",  					
+				ud->usr_id, (cur_time_l-g_last_statistics_time)/1000, (const char *)message->payload, g_total_msg_counter,g_total_delay/g_recv_print_speed,g_max_delay,g_min_delay);
 				fflush(stdout);
 				g_total_delay = 0;
 				g_max_delay = 0;
-				g_min_delay;
-				if(g_total_msg_counter>99999999999 || g_total_msg_counter <=0)
+				g_min_delay = 0;
+				g_last_statistics_time = cur_time_l;
+				if(g_total_msg_counter>9999999999999 || g_total_msg_counter <=0)
 					g_total_msg_counter = 0;
 			}
+			//printf("[my_message_callback] will handle receive over counter[%d]\n", g_total_msg_counter);
 		}
 	}
 }
@@ -111,8 +128,8 @@ void my_connect_callback(struct mosquitto *mosq, void *obj, int result)
 	int res = 0;
 	if(!result){
 		for(i=0; i<ud->topic_count; i++){
-			res = mosquitto_subscribe(mosq, NULL, ud->topics[i], ud->topic_qos);
-			printf("[my_connect_callback] client:%s subscribe topic: %s, res:%d\n",ud->usr_id,ud->topics[i],res);
+		    res = mosquitto_subscribe(mosq, NULL, ud->topics[i], ud->topic_qos);
+		    printf("[my_connect_callback] client:%s subscribe topic: %s, res:%d\n",ud->usr_id,ud->topics[i],res);
 		}
 	}else{
 		if(result && !ud->quiet){
@@ -131,7 +148,7 @@ void my_subscribe_callback(struct mosquitto *mosq, void *obj, int mid, int qos_c
 	}
 	ud = (struct userdata *)obj;
 	ud->is_sub = true;
-	if(!ud->quiet) printf("[my_subscribe_callback] client %s, socket %d Subscribes (mid: %d): %d;qos_count:%d",mosq->id,mosq->sock, mid, granted_qos[0],qos_count);
+	if(!ud->quiet) printf("[my_subscribe_callback] client ID: %s, socket:%d Subscribes (mid: %d): %d;qos_count:%d",mosq->id,mosq->sock, mid, granted_qos[0],qos_count);
 	for(i=1; i<qos_count; i++){
 		if(!ud->quiet) printf(", %d", granted_qos[i]);
 	}
@@ -140,7 +157,7 @@ void my_subscribe_callback(struct mosquitto *mosq, void *obj, int mid, int qos_c
 
 void my_log_callback(struct mosquitto *mosq, void *obj, int level, const char *str)
 {
-	printf("[my_log_callback] : %s\n", str);
+	printf("[my_log_callback]: %s\n", str);
 }
 
 void print_usage(void)
@@ -173,6 +190,9 @@ int reg_clients(struct userdata* _tmp_usr_data, char *pStrLocalVirtualIP)
 		printf("[reg_clients]: mosquitto_new fail...\n");
 		free(_tmp_usr_data);
 		return -1;
+	}
+	if(_tmp_usr_data->keepalive > 0){
+	    _cur_context->keepalive = _tmp_usr_data->keepalive;
 	}
 	_cur_context->username = strdup(_tmp_usr_data->username);
 	_cur_context->password = strdup(_tmp_usr_data->password);
@@ -210,47 +230,41 @@ static void* handle_thread(void* _param)
 {
 	int event_num = 0;
 	struct epoll_event* epoll_events = NULL;
-	int event_buf_len = DEFAULT_COMMON_VALUE;
+	int event_buf_len = g_client_cfg.end_id - g_client_cfg.start_id + DEFAULT_COMMON_VALUE;
 
 	epoll_events = (struct epoll_event*)malloc(sizeof(struct epoll_event)*event_buf_len);
 	if(!epoll_events){
 		printf("[handle_thread] Error: Out of memory. ---epoll_events\n");
 		return (void*)0;
 	}
-	long last_t = time(NULL);
-	long curtime_t =time(NULL);
-	sleep(3);
+    printf("[handle_thread]number of clients: %d, max events for epoll: %d\n",g_client_cfg.end_id - g_client_cfg.start_id, event_buf_len);
+
+	long last_check_time = mosquitto_time();
+	long current_time;
 	while(!g_clients_db.stop_handle_thread){
-		curtime_t =time(NULL);
-		if(event_num > event_buf_len - 100 ){
-			event_buf_len = event_num > event_buf_len ? event_num*2 : event_buf_len*2;
-			epoll_events = realloc(epoll_events, sizeof(struct epoll_event)*event_buf_len);
-			if(!epoll_events){
-				printf("[handle_thread]Error: _mosquitto_realloc. ---epoll_events\n");
-				return (void*)0;
-			}
-		}
 		pthread_mutex_lock (&g_epoll_id_lock);
-		event_num = epoll_wait(g_clients_db.epoll_fd,epoll_events,event_buf_len,100);
+		event_num = epoll_wait(g_clients_db.epoll_fd,epoll_events,event_buf_len, 1000);
 		pthread_mutex_unlock(&g_epoll_id_lock);
-		if(event_num == -1)
-			printf("[handle_thread]error ,after epoll_wait %d\n",event_num);
-		else
+		if(event_num > 0){
 			handle_events_result(epoll_events, event_num);
-		last_t = curtime_t;
-		check_clients();
-//		sleep(1);
+		}
+		else{
+		printf("[handle_thread] current event num[%d]\n",event_num);
+		}
+		
+		current_time = mosquitto_time();
+		if(current_time - last_check_time >= g_client_cfg.keep_alive){
+		    last_check_time = current_time;
+		    check_clients();  
+		}
+
 	}
 	printf("[handle_thread] return from handle_thread\n");
 	return (void*)0;
 
 }
 
-void* thread_func(void* _param)
-{
-	printf("[thread_func]:will call func1()\n");
 
-}
 
 int join_handle_thread()
 {
@@ -340,18 +354,15 @@ int unreg_socket(struct userdata* _tmp_usr_data)
 }
 
 
-int init_db(struct t_client_config* p_config_data)
-{
-	if(NULL == p_config_data)
-		return -1;
+int init_db(){
 	memset(&g_clients_db, 0, sizeof(struct t_client_database));
-	int client_num = p_config_data->end_id - p_config_data->start_id;
+	int client_num = g_client_cfg.end_id - g_client_cfg.start_id;
 	if(client_num <=0){
 		printf("[init_db] client_num <=0\n");
 		return -10;
 	}
-	g_clients_db.start_id = p_config_data->start_id;
-	g_clients_db.end_id = p_config_data->end_id;
+	g_clients_db.start_id = g_client_cfg.start_id;
+	g_clients_db.end_id = g_client_cfg.end_id;
 	g_clients_db.handle_thread_id = -1;
 	g_clients_db.stop_handle_thread = false;
 	g_clients_db.used_buf_len = 0;
@@ -362,17 +373,17 @@ int init_db(struct t_client_config* p_config_data)
 		return -3;
 	memset(g_clients_db.usr_info_array, 0, client_num*sizeof(struct userdata *));
 
-	g_clients_db.server_host = strdup(p_config_data->host);
-	g_clients_db.server_port = p_config_data->port;
+	g_clients_db.server_host = strdup(g_client_cfg.host);
+	g_clients_db.server_port = g_client_cfg.port;
 	g_clients_db.epoll_fd = epoll_create(1024);
 	g_clients_db.handle_thread_id = -1;
 	g_clients_db.is_inited = true;
-	g_clients_db.keep_alive = p_config_data->keep_alive;
+	g_clients_db.keep_alive = g_client_cfg.keep_alive;
 
 	return TC_SUC;
 }
 
-int uninit_data(struct t_client_config* p_config_data)
+int uninit_data()
 {
 	if(g_clients_db.server_host){
 		free(g_clients_db.server_host);
@@ -422,6 +433,7 @@ void handle_events_result(struct epoll_event* epoll_events, int _event_num)
 void check_clients()
 {
 	int i = 0;
+	long start_time = mosquitto_time();
 	for(i=0; i<g_clients_db.max_buf_len; i++){
 		if(NULL == g_clients_db.usr_info_array[i]){
 			//printf("[check_clients] NULL == g_clients_db.usr_info_array[%d]\n",i);
@@ -437,8 +449,10 @@ void check_clients()
 		}
 		else
 			mosquitto_loop_misc(g_clients_db.usr_info_array[i]->context);
-		
 	}
+
+	long end_time = mosquitto_time();
+	printf("[check_clients]%d elements checked over;time consumed: %ld -%ld = %ld\n", g_clients_db.max_buf_len, end_time, start_time, end_time-start_time);
 }
 
 
@@ -576,55 +590,58 @@ struct userdata * create_usr(int _usr_id, struct t_client_config* p_client_cfg)
 		printf("[create_usr] 2. malloc fail for:id=%d \n",_usr_id);
 		return NULL;
 	}
-	if(NULL != p_client_cfg->topic_prefix)
-		sprintf(_usr_data->topics[0],"%s%d",p_client_cfg->topic_prefix,_usr_id);
+	
+	if(NULL != p_client_cfg->topic_prefix || (NULL!=p_client_cfg->topic_suffix))
+		sprintf(_usr_data->topics[0],"%s%d%s",p_client_cfg->topic_prefix,_usr_id,p_client_cfg->topic_suffix);
 	else
 		sprintf(_usr_data->topics[0],"%d",_usr_id);
 	return _usr_data;
 }
 
-int get_config(struct t_client_config* p_client_cfg)
+int get_config()
 {
-	if(NULL == p_client_cfg)
-		return -1;
+
 	EnableLog(false);
 	if(TC_SUC != cfg_Open(CONFIG_FILE_NAME)){
 		printf("[get_config] open config: *%s *fail",CONFIG_FILE_NAME);
 		return -100;
 	}
-	p_client_cfg->debug = true;
+	g_client_cfg.debug = true;
 
 	char host_buf[MAX_HOST_BUF_LEN];
 	if(!GetValue_str("COMMON", "host",host_buf)){
 		printf("[get_config] get *host* fail from config file \n");
 		return -100;
 	}
-	p_client_cfg->host = strdup(host_buf);
+	g_client_cfg.host = strdup(host_buf);
+
+
+	g_client_cfg.host = strdup(host_buf);
 
 	int tmp_value;
 	if(!GetValue_int("COMMON", "port",&tmp_value)){
 		tmp_value = 1883;
 		printf("[get_config] get *port* fail from config file, %d will be used as default port\n",tmp_value);
 	}
-	p_client_cfg->port = tmp_value;
+	g_client_cfg.port = tmp_value;
 
 	if(!GetValue_int("GROUP", "startid",&tmp_value)){
 		printf("[get_config] get *startid* fail from config file\n");
 		return -100;
 	}
-	p_client_cfg->start_id = tmp_value;
+	g_client_cfg.start_id = tmp_value;
 
 	if(!GetValue_int("GROUP", "endid",&tmp_value)){
 		printf("[get_config] get *end_id* fail from config file\n");
 		return -100;
 	}
-	p_client_cfg->end_id = tmp_value;
+	g_client_cfg.end_id = tmp_value;
 	
 	if(!GetValue_int("GROUP", "keepalive",&tmp_value)){
 		tmp_value = 60;
 		printf("[get_config] get *keepalive* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->keep_alive = tmp_value;
+	g_client_cfg.keep_alive = tmp_value;
 
 	//get virtual IPs from config file. aiden150728
 	char virtual_IP_buf[MAX_VIRTUALIP_BUF_LEN];
@@ -641,10 +658,10 @@ int get_config(struct t_client_config* p_client_cfg)
 	{
 		if (NULL == result)
 		{
-			p_client_cfg->virtual_ip[i] = NULL;
+			g_client_cfg.virtual_ip[i] = NULL;
 			break;
 		}
-		p_client_cfg->virtual_ip[i] = strdup(result);		
+		g_client_cfg.virtual_ip[i] = strdup(result);		
 		result = strtok(NULL, delims);
 	}
 
@@ -652,92 +669,113 @@ int get_config(struct t_client_config* p_client_cfg)
 		tmp_value = 3;
 		printf("[get_config] get *sleep_time_max* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->sleep_time_max = tmp_value;
+	g_client_cfg.sleep_time_max = tmp_value;
 
 	if(!GetValue_int("GROUP", "sleep_time_mid",&tmp_value)){
 		tmp_value = 2;
 		printf("[get_config] get *sleep_time_mid* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->sleep_time_mid = tmp_value;
+	g_client_cfg.sleep_time_mid = tmp_value;
 
 	if(!GetValue_int("GROUP", "sleep_time_min",&tmp_value)){
 		tmp_value = 1;
 		printf("[get_config] get *sleep_time_min* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->sleep_time_min= tmp_value;
+	g_client_cfg.sleep_time_min= tmp_value;
 
 	if(!GetValue_int("GROUP", "sleep_level1",&tmp_value)){
 		tmp_value = 2000;
 		printf("[get_config] get *sleep_level1* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->sleep_level1= tmp_value;
+	g_client_cfg.sleep_level1= tmp_value;
 
 	if(!GetValue_int("GROUP", "sleep_level2",&tmp_value)){
 		tmp_value = 5000;
 		printf("[get_config] get *sleep_level2* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->sleep_level2= tmp_value;
+	g_client_cfg.sleep_level2= tmp_value;
 
 	if(!GetValue_int("GROUP", "sleep_level3",&tmp_value)){
 		tmp_value = 10000;
 		printf("[get_config] get *sleep_level3* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->sleep_level3= tmp_value;
+	g_client_cfg.sleep_level3= tmp_value;
 
 	if(!GetValue_int("GROUP", "sleep_interval_max",&tmp_value)){
 		tmp_value = 100;
 		printf("[get_config] get *sleep_interval_max* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->sleep_interval_max= tmp_value;
+	g_client_cfg.sleep_interval_max= tmp_value;
 
 	if(!GetValue_int("GROUP", "sleep_interval_mid",&tmp_value)){
 		tmp_value = 50;
 		printf("[get_config] get *sleep_interval_mid* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->sleep_interval_mid= tmp_value;
+	g_client_cfg.sleep_interval_mid= tmp_value;
 
 	if(!GetValue_int("GROUP", "sleep_interval_min",&tmp_value)){
 		tmp_value = 10;
 		printf("[get_config] get *sleep_interval_min* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->sleep_interval_min= tmp_value;
+	g_client_cfg.sleep_interval_min= tmp_value;
 
 	if(!GetValue_int("SEND", "batchSize",&tmp_value)){
 		tmp_value = 50;
 		printf("[get_config] get *batchSize* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->batchSize= tmp_value;
+	g_client_cfg.batchSize= tmp_value;
 	
 	if(!GetValue_int("SEND", "sleepAfterBatch",&tmp_value)){
 		tmp_value = 1000*1000;
 		printf("[get_config] get *sleepAfterBatch* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->sleepAfterBatch= tmp_value;//外面配的是us
+	g_client_cfg.sleepAfterBatch= tmp_value;//外面配的是us
 
 	if(!GetValue_int("RECV", "recv_print_speed",&tmp_value)){
 		tmp_value = 1000;
 		printf("[get_config] get *recv_print_speed* fail from config file, will use %d as default value\n",tmp_value);
 	}
 	g_recv_print_speed= tmp_value;
-	p_client_cfg->recv_print_speed = tmp_value;
+	g_client_cfg.recv_print_speed = tmp_value;
 
 	if(!GetValue_int("SEND", "send_print_speed",&tmp_value)){
 		tmp_value = 1000;
 		printf("[get_config] get *send_print_speed* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->send_print_speed = tmp_value;
+	g_client_cfg.send_print_speed = tmp_value;
 
 	char tmp_buf[DEFAULT_COMMON_VALUE];
 	memset(tmp_buf, '\0',DEFAULT_COMMON_VALUE);
 	if(!GetValue_str("GROUP", "topic_prefix",tmp_buf)){
 		printf("[get_config] get *topic_prefix* fail from config file \n");
-		p_client_cfg->topic_prefix = NULL;
+		g_client_cfg.topic_prefix = NULL;
 		return -100;
 	}
 	else{
-		p_client_cfg->topic_prefix = strdup(tmp_buf);
-		//printf("get topic prefix:[%s];tmp_buf[%s]\n",p_client_cfg->topic_prefix,tmp_buf);
+		g_client_cfg.topic_prefix = strdup(tmp_buf);
+		printf("[get_config] get topic prefix:[%s]\n",g_client_cfg.topic_prefix);
 	}
+    memset(tmp_buf, '\0',DEFAULT_COMMON_VALUE);
+	if(!GetValue_str("GROUP", "topic_suffix",tmp_buf)){
+		printf("[get_config] get *topic_prefix* fail from config file \n");
+		g_client_cfg.topic_suffix = NULL;
+		return -100;
+	}
+	else{
+		g_client_cfg.topic_suffix = strdup(tmp_buf);
+		printf("[get_config] get topic suffix:[%s]\n",g_client_cfg.topic_suffix);
+	}
+
+    char msg_buf[MAX_MSG_LEN] = {0};
+     if(!GetValue_str("GROUP", "msg",msg_buf)){
+            g_client_cfg.msg = NULL;
+     }else{
+            g_client_cfg.msg = strdup(msg_buf);
+    
+     }
+    printf("[get_config] get msg:[%s]\n", g_client_cfg.msg);
+
+
 	
 	if(!GetValue_int("SEND", "test_type",&tmp_value)){
 		tmp_value = 0;
@@ -745,22 +783,22 @@ int get_config(struct t_client_config* p_client_cfg)
 	}
 	switch(tmp_value){
 		case 0 :
-			p_client_cfg->test_type= TEST_TYPE_ONLY_RECEIVE;
+			g_client_cfg.test_type= TEST_TYPE_ONLY_RECEIVE;
 			break;
 		case 1:
-			p_client_cfg->test_type= TEST_TYPE_SEND_TO_ITSELF;
+			g_client_cfg.test_type= TEST_TYPE_SEND_TO_ITSELF;
 			break;
 		case 2:
-			p_client_cfg->test_type= TEST_TYPE_SEND_TO_OTHERS;
+			g_client_cfg.test_type= TEST_TYPE_SEND_TO_OTHERS;
 			break;
 		default:
-			p_client_cfg->test_type= TEST_TYPE_UNKNOWN_TYPE;
+			g_client_cfg.test_type= TEST_TYPE_UNKNOWN_TYPE;
 	}
 	if(!GetValue_int("SEND", "send_context_id",&tmp_value)){
-		tmp_value = p_client_cfg->start_id;
+		tmp_value = g_client_cfg.start_id;
 		printf("[get_config] get *use_send* fail from config file, will use %d as default value\n",tmp_value);
 	}
-	p_client_cfg->send_client_id = tmp_value;
+	g_client_cfg.send_client_id = tmp_value;
 
 	cfg_Close();
 	return TC_SUC;
@@ -844,17 +882,15 @@ int join_send_thread()
 
 }
 
-int create_send_thread(struct t_client_config* cfg_data)
+int create_send_thread()
 {
-	if(NULL == cfg_data)
-		return TC_ERROR;
-	if(TEST_TYPE_ONLY_RECEIVE == cfg_data->test_type)
+	if(TEST_TYPE_ONLY_RECEIVE == g_client_cfg.test_type)
 		return TC_SUC;
 	int _ret = 0;
 	g_clients_db.stop_send_thread = false;
-	_ret = pthread_create(&g_clients_db.send_thread_id, NULL, send_thread,(void*)cfg_data);
+	_ret = pthread_create(&g_clients_db.send_thread_id, NULL, send_thread,(void*)&g_client_cfg);
 	if(_ret != 0){
-		printf("[create_send_thread]:fail pthread_create:send_thread()\n");
+		printf("[create_send_thread]:fail pthread_create:send_thread(),result:%d\n", _ret);
 		g_clients_db.stop_send_thread = true;
 		return -40;
 	}
@@ -934,22 +970,25 @@ static void* send_thread(void* _param)
 			default:
 				usleep(1000);				
 		}
+		
+		cur_mosq_index++;
+		if (cur_mosq_index >= g_clients_db.used_buf_len)
+		{
+			cur_mosq_index = 0;
+		}
+		
 		//每发送了batchSize个消息后，休息sleepAfterBatch微秒
 		lSendCounter++;//发送信息累计计数+1
 		if(0 == lSendCounter % p_client_cfg->batchSize)
 		{
 			usleep(p_client_cfg->sleepAfterBatch);
 		}
-		if (lSendCounter > 999999999)//防止溢出
+		if (lSendCounter > 99999999999)//防止溢出
 		{
 			lSendCounter = 0;
 		}
 
-		cur_mosq_index++;
-		if (cur_mosq_index >= g_clients_db.used_buf_len)
-		{
-			cur_mosq_index = 0;
-		}
+	
 		
 		//计算发送消息的速度，单位 条/s。不是实时计算，而是每发送p_client_cfg->send_print_speed条消息后，才计算并打印一次log。求余时用lSendCounter比较好，不能用cur_mosq_index，它会周期性被重置为0，不准
 		if(0 == lSendCounter % p_client_cfg->send_print_speed)
@@ -964,8 +1003,7 @@ static void* send_thread(void* _param)
 			}
 
 			//更新起始时间
-			gettimeofday(&t_start, NULL);
-			lStartTime = ((long)t_start.tv_sec) * 1000 + (long)t_start.tv_usec / 1000;
+			lStartTime = lEndTime;
 		}
 	}
 }
@@ -1015,21 +1053,30 @@ static void pub(struct userdata *send_mosq_info, struct userdata *recv_mosq_info
 	send_mosq_info->send_msg_counter++;
 
 	memset(g_SendMsgBuf, '\0', MAX_MSG_LEN);
+	/*if(g_client_cfg.msg == NULL){
 	sprintf(g_SendMsgBuf,"<id:%s><c:%d><t:%ld>",send_mosq_info->usr_id, send_mosq_info->send_msg_counter,cur_time.tv_sec*1000000+cur_time.tv_usec);
+	}else{
+	sprintf(g_SendMsgBuf,"<id:%s><c:%d><t:%ld>%s",send_mosq_info->usr_id, send_mosq_info->send_msg_counter,cur_time.tv_sec*1000000+cur_time.tv_usec, g_client_cfg.msg);
+	}*/
+	if(g_client_cfg.msg == NULL){
+	sprintf(g_SendMsgBuf,"<t:%ld>",cur_time.tv_sec*1000000+cur_time.tv_usec);
+	}else{
+	sprintf(g_SendMsgBuf,"<t:%ld>%s",cur_time.tv_sec*1000000+cur_time.tv_usec, g_client_cfg.msg);
+	}
+	
 	mosquitto_publish(send_mosq_info->context, NULL, recv_mosq_info->topics[0], strlen(g_SendMsgBuf), g_SendMsgBuf, 0, 0);
+    //printf("[pub] client(%s),topic(%s),msg(%s)\n",send_mosq_info->context->id, recv_mosq_info->topics[0],g_SendMsgBuf);
 
-	//if(send_counter%print_speed == 0)
-		//printf("[S->]:%s\n",g_SendMsgBuf);//20150813
 }
 
 int main()
 {
 	printf("****************************************************************\n");
-	printf("*                                                              *\n");
-	printf("*                         V1.0.3                               *\n");
-	printf("*                                                              *\n");
+	printf("*                       mqtt tester                            *\n");
+	printf("*                         V1.1.1                               *\n");
+	printf("*                       2021-05-19                             *\n");
 	printf("****************************************************************\n");
-	printf("press any key to continue...");
+	printf("Test information:");
 	char chAnyKey = getchar();
 	int i;
 	int ires = 0;
@@ -1037,36 +1084,40 @@ int main()
 	static int reg_success_num = 0;
 	struct userdata *_cur_usr_data = NULL;
 	mosquitto_lib_init();
-	
-	struct t_client_config client_cfg;
-	memset(&client_cfg, 0, sizeof(struct t_client_config));
-	printf("\n[main] 1. get configue data:\n");
-	if(TC_SUC != get_config(&client_cfg)){
+
+	printf("\n[main]1.Will read config file\n");
+	if(TC_SUC != get_config()){
 		printf("\n[main] get configue data fail\n");
 		goto handle_over_pos;
 	}
+    printf("Read config file over! detail:\n");
+	printf("(1)MqttBroker address:%s,port:%d\n", g_client_cfg.host, g_client_cfg.port);
+    printf("(2)clientId:%d - %d,total:%d\n", g_client_cfg.start_id, g_client_cfg.end_id, g_client_cfg.end_id-g_client_cfg.start_id);
+    printf("(3)Test type %d; 0: Only Recieve;1:send to self;2: send to other client (client ID is defined in config file)\n", g_client_cfg.test_type);
+	printf("(4)Local IP list\n");
 	i = 0;
-	while(client_cfg.virtual_ip[i])
+	while(g_client_cfg.virtual_ip[i])
 	{
-		printf("\[main] ip[%d] = %s\n", i, client_cfg.virtual_ip[i]);
+		printf("     ip[%d] = %s\n", i, g_client_cfg.virtual_ip[i]);
 		i++;
 	}
-	printf("press any key to continue...");
+	
+    printf("Press any key to continue...\n");
 	chAnyKey = getchar();
 
- 	if(TEST_TYPE_UNKNOWN_TYPE == client_cfg.test_type){
+ 	if(TEST_TYPE_UNKNOWN_TYPE == g_client_cfg.test_type){
 		printf("\n[main] your \"test_type\" is unknown;0:only receive; 1: send to itself; 2:send to others;\n");
 		goto handle_over_pos;
  	}
 	
-	printf("\n[main] 2. init_db:\n");
-	ires = init_db(&client_cfg);
+	printf("\n[main] 2.Init...\n");
+	ires = init_db();
 	if(TC_SUC != ires){
 		printf("[main] init_db res =%d\n",ires);
 		goto handle_over_pos;
 	}
 
-	printf("\n[main] 3. create_handle_thread:\n");
+	printf("\n[main] 3.Create send thread\n");
 	ires = create_handle_thread();
 	if(TC_SUC != ires){
 		printf("[main] create_handle_thread res =%d\n",ires);
@@ -1075,13 +1126,13 @@ int main()
 
 	//多个虚拟ip，ip[0]~ip[n]，先用ip[0]来不停注册链接，端口是内核自己找空闲的来用。如果连续MAX_FAIL_NUM次都没有正常生成client，说明ip[0]的空闲端口已被压榨完毕。
 	//此时，转到ip[1]，继续尝试生成client。如此循环，直到ip[n]也没有空闲port时，打印个log，说无法再生成新client了，然后break，继续运行程序其他步骤。
-	printf("\n[main] 4. reg_clients:\n");
-	int nStrategy = 2;//1：每个ip生成固定个数的client，随后切换ip；2：每个ip尽可能的压榨port，直到连续MAX_FAIL_NUM次生成失败之后，再切换ip
+	printf("\n[main] 4. reg clients:\n");
+	int nStrategy = 2;//1:每个ip生成固定个数的client，随后切换ip；2:每个ip尽可能的压榨port，直到连续MAX_FAIL_NUM次生成失败之后，再切换ip
 	int nRes = -1;
 	int nLocalVirtualIPIdx = 0;
-	char* pStrLocalVirtualIP = client_cfg.virtual_ip[nLocalVirtualIPIdx];
-	for(i=client_cfg.start_id; i<client_cfg.end_id; ++i){
-		_cur_usr_data = create_usr(i,&client_cfg);
+	char* pStrLocalVirtualIP = g_client_cfg.virtual_ip[nLocalVirtualIPIdx];
+	for(i=g_client_cfg.start_id; i<g_client_cfg.end_id; ++i){
+		_cur_usr_data = create_usr(i,&g_client_cfg);
 		if(NULL == _cur_usr_data)
 			continue;
 		nRes = reg_clients(_cur_usr_data, pStrLocalVirtualIP);
@@ -1092,16 +1143,16 @@ int main()
 				reg_success_num++;
 				if (reg_success_num > 40000)
 				{
-					if (NULL == client_cfg.virtual_ip[++nLocalVirtualIPIdx])//是否有下一个备选虚拟ip
+					if (NULL == g_client_cfg.virtual_ip[++nLocalVirtualIPIdx])//是否有下一个备选虚拟ip
 					{
 						//没有备选ip，打印log，继续往下执行
-						printf("[main] insufficient virtual ip, unable to create new user any more\n");
+						printf("[main]local ip is over, Cann't create new client\n");
 						break;
 					}
 					else
 					{
 						//有备选ip，则今后用这个新ip建立client，reg_success_num置零，continue开始下一次for循环
-						pStrLocalVirtualIP = client_cfg.virtual_ip[nLocalVirtualIPIdx];
+						pStrLocalVirtualIP = g_client_cfg.virtual_ip[nLocalVirtualIPIdx];
 						reg_success_num = 0;
 						continue;
 					}
@@ -1119,7 +1170,7 @@ int main()
 				}
 				else
 				{
-					if (NULL == client_cfg.virtual_ip[++nLocalVirtualIPIdx])//是否有下一个备选虚拟ip
+					if (NULL == g_client_cfg.virtual_ip[++nLocalVirtualIPIdx])//是否有下一个备选虚拟ip
 					{						
 						//没有备选ip，打印log，继续往下执行
 						printf("[main] total fail num is %d, won't create new user\n", reg_fail_num);
@@ -1128,19 +1179,19 @@ int main()
 					else
 					{
 						//有备选ip，则今后用这个新ip建立client，reg_fail_num置零，continue开始下一次for循环
-						pStrLocalVirtualIP = client_cfg.virtual_ip[nLocalVirtualIPIdx];
+						pStrLocalVirtualIP = g_client_cfg.virtual_ip[nLocalVirtualIPIdx];
 						reg_fail_num = 0;
 						continue;
 					}
 				}//判断reg_fail_num结束
 			}//判断 nRes结束
 		}//策略2结束
-		printf("[main]   register clientid:(%d),usr:(%s) pwd:(%s) localip:(%s) over\n\n",i,_cur_usr_data->username,_cur_usr_data->password, pStrLocalVirtualIP);
-		usleep(get_sleep_time(&client_cfg));
+		printf("[main]   register client (id:%s) over! usr name(%s), password(%s), localip(%s)\n\n",_cur_usr_data->usr_id,_cur_usr_data->username,_cur_usr_data->password, pStrLocalVirtualIP);
+		usleep(get_sleep_time(&g_client_cfg));
 	}
 
 	printf("\n[main] 5. create_send_thread:\n");
-	ires = create_send_thread(&client_cfg);
+	ires = create_send_thread();
 	if(TC_SUC != ires){
 		printf("[main] create_send_thread res =%d\n",ires);
 		goto handle_over_pos;
@@ -1151,7 +1202,7 @@ int main()
 	join_send_thread();
 
 handle_over_pos:
-	uninit_data(&client_cfg);
+	uninit_data();
 	mosquitto_lib_cleanup();
 	printf("[main] 7. test_over\n");
 	return 0;

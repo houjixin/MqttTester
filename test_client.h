@@ -22,13 +22,15 @@
 #define MAX_VIRTUALIP_BUF_LEN 1000//virtual IPs buf len aiden150728
 #define MAX_VIRTUALIP_NUM 50//virtual IPs num aiden150728
 #define DEFAULT_COMMON_VALUE 1024
-#define CONFIG_FILE_NAME "sub_client.conf"
+#define CONFIG_FILE_NAME "mosq_tester.conf"
 #define MAX_FAIL_NUM 100
 
 #define PWD_USR_BEGIN 10000
 #define PWD_USR_END 30000
 
-#define MAX_MSG_LEN 10240
+#define MAX_MSG_LEN 1024000
+#define MAX_LONG 9999999999999
+
 
 
 #define TC_SUC 0
@@ -113,6 +115,8 @@ struct t_client_config{
 	int send_print_speed;
 	int recv_print_speed;
 	char* topic_prefix;
+	char* topic_suffix;
+	char* msg;
 	enum e_test_type test_type;
 	int send_client_id;
 	int send_client_index;
@@ -135,7 +139,7 @@ void set_fd2c(int key_fd,int _client_index);
 long int get_time(char* msg);
 
 
-int create_send_thread(struct t_client_config* cfg_data);
+int create_send_thread();
 int join_send_thread();
 static void* send_thread(void* _param);
 //static void pub(struct userdata *mosq_info,struct t_client_config* p_client_cfg);
@@ -149,8 +153,8 @@ extern "C" {
 
 libmosq_EXPORT int join_handle_thread();
 libmosq_EXPORT int create_handle_thread();
-libmosq_EXPORT int init_db(struct t_client_config* p_config_data);
-libmosq_EXPORT int uninit_data(struct t_client_config* p_config_data);
+libmosq_EXPORT int init_db();
+libmosq_EXPORT int uninit_data();
 libmosq_EXPORT int reg_clients(struct userdata* _tmp_usr_data, char *pStrLocalVirtualIP);
 
 

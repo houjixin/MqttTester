@@ -107,7 +107,6 @@ void _mosquitto_check_keepalive(struct mosquitto *mosq)
 	last_msg_out = mosq->last_msg_out;
 	last_msg_in = mosq->last_msg_in;
 	pthread_mutex_unlock(&mosq->msgtime_mutex);
-	//printf("[_mosquitto_check_keepalive] id:%s,sock=%d,(now-last_msg_out = %d),(now - last_msg_in=%d),(mosq->keepalive=%d)\n", mosq->id,mosq->sock, now-last_msg_out,now - last_msg_in,mosq->keepalive);
 	if(mosq->sock != INVALID_SOCKET &&
 			(now - last_msg_out >= mosq->keepalive || now - last_msg_in >= mosq->keepalive)){
 
@@ -119,7 +118,6 @@ void _mosquitto_check_keepalive(struct mosquitto *mosq)
 			mosq->last_msg_out = now;
 			pthread_mutex_unlock(&mosq->msgtime_mutex);
 		}else{
-		printf("[_mosquitto_check_keepalive] not send ping,client id:%s, mosq->ping_t=%d\n",mosq->id, mosq->ping_t);
 #ifdef WITH_BROKER
 			if(mosq->listener){
 				mosq->listener->client_count--;
